@@ -139,7 +139,7 @@ int main(int argc, char **argv) {
         else for (i=0; (*out)[i]; i++) printf("Stdout line %d: %s\n", i+1, (*out)[i]);
         if (*out) free(*out);
         // Display stderr
-        if ((*err)[0]==0) printf("No Stderr\n");
+        if (!err || (*err)[0]==0) printf("No Stderr\n");
         else for (i=0; (*err)[i]; i++) printf("Stderr line %d: %s\n", i+1, (*err)[i]);
         if (*err) free(*err);
     }
