@@ -1832,7 +1832,7 @@ int CreateConsole(SHELLDATA* data)
         close(data->consoleSlave);
         char option[10];
         sprintf(option, "-S%c/%d", name[strlen(name)-1], data->consoleMaster);
-        execlp("xterm", "xterm", option, (char *)0)hhhh;
+        execlp("xterm", "xterm", option, (char *)0);
         exit(-1);
     }
 
