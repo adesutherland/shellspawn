@@ -16,6 +16,8 @@ else()
     set(PLATFORM_SRC)
 endif()
 
+file(COPY input.txt DESTINATION ${CMAKE_BINARY_DIR})
+
 add_executable(testclient testclient.c)
 
 add_executable(shelltest shelltest.c shellspawn.h ${PLATFORM_SRC})

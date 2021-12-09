@@ -45,7 +45,7 @@
 #include <windows.h>
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -66,8 +66,8 @@ void Message(char *message);
 
 int main() {
 
-#ifdef __linux__
-    // To make sure we are well and truely disconnected from a terminal
+#if defined(__linux__) || defined(__APPLE__)
+ // To make sure we are well and truely disconnected from a terminal
  int nfd=open("/dev/null", O_RDWR);
 
  if (nfd<0)
@@ -123,40 +123,13 @@ int main() {
 
 #ifdef _WIN32
     char* command = "testclient.exe";
-#endif
-
-#ifdef __linux__
+#else
     char* command = "testclient";
 #endif
 
     int rc=0;
     char **spawnErrorText;
     int spawnErrorCode;
-
-    {
-        Message("Stdio Test (interactive)");
-        fprintf(log, "\n\nStdio Test (interactive) - \"quit\" closes stdin)\n");
-        fflush(log);
-        spawnErrorCode = shellspawn(command, NULL, NULL, NULL, stdin,
-                                    NULL, NULL, NULL, stdout,
-                                    NULL, NULL, NULL, stderr, &rc, spawnErrorText, NULL);
-        if (spawnErrorCode == SHELLSPAWN_NOFOUND)
-        {
-            Message("testclient not found - check current directory");
-            fprintf(log,"Error Spawning Process. SpawnRC=%d. Error Text=%s\n", spawnErrorCode, *spawnErrorText);
-            fflush(log);
-            if (*spawnErrorText) free(*spawnErrorText);
-            exit(-1);
-        }
-        if (spawnErrorCode) {
-            fprintf(log,"Error Spawning Process. SpawnRC=%d. Error Text=%s\n", spawnErrorCode, *spawnErrorText);
-            fflush(log);
-            if (*spawnErrorText) free(*spawnErrorText);
-            *spawnErrorText = 0;
-        }
-        fprintf(log,"RC=%d\n", rc);
-        fflush(log);
-    }
 
     {
         Message("FILE* Test");
@@ -207,6 +180,31 @@ int main() {
             fprintf(log, "Error closing err file RC=%d\n", rc);
             fflush(log);
         }
+    }
+
+    {
+        Message("Stdio Test (interactive)");
+        fprintf(log, "\n\nStdio Test (interactive) - \"quit\" closes stdin)\n");
+        fflush(log);
+        spawnErrorCode = shellspawn(command, NULL, NULL, NULL, stdin,
+                                    NULL, NULL, NULL, stdout,
+                                    NULL, NULL, NULL, stderr, &rc, spawnErrorText, NULL);
+        if (spawnErrorCode == SHELLSPAWN_NOFOUND)
+        {
+            Message("testclient not found - check current directory");
+            fprintf(log,"Error Spawning Process. SpawnRC=%d. Error Text=%s\n", spawnErrorCode, *spawnErrorText);
+            fflush(log);
+            if (*spawnErrorText) free(*spawnErrorText);
+            exit(-1);
+        }
+        if (spawnErrorCode) {
+            fprintf(log,"Error Spawning Process. SpawnRC=%d. Error Text=%s\n", spawnErrorCode, *spawnErrorText);
+            fflush(log);
+            if (*spawnErrorText) free(*spawnErrorText);
+            *spawnErrorText = 0;
+        }
+        fprintf(log,"RC=%d\n", rc);
+        fflush(log);
     }
 
     fclose(log);
