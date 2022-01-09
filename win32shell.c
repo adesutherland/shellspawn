@@ -50,7 +50,7 @@
 
 #include "shellspawn.h"
 
-/* Suff to make it easy to call _beginthreadex */
+/* Stuff to make it easy to call _beginthreadex */
 typedef unsigned (__stdcall *PTHREAD_START) (void *);
 #define safeCreateThread(psa, cbStack, pfnStartAddr, \
      pvParam, fdwCreate, pdwThreadID)                \
@@ -101,7 +101,6 @@ typedef struct win32shelldata {
     int callbackRC;
     void* context;
     int needsConsole;
-    int createdConsole;
 } SHELLDATA;
 
 // Private functions
@@ -117,8 +116,7 @@ static void HandleOutputToCallback(HANDLE hRead, OUTHANDLER fOut, int *error, ch
 static void HandleStdinFromVector(SHELLDATA* data);
 static void HandleStdinFromCallback(SHELLDATA* data);
 static int HandleCallback(SHELLDATA* data, char **errorText);
-static void NeedsNewConsole(FILE* file, SHELLDATA* data);
-static void PressToContinue();
+void NeedsConsole(FILE* file, SHELLDATA* data);
 
 static void setTextOutput(char **outputText, char *inputText) {
     if (*outputText) free(*outputText);
@@ -205,7 +203,6 @@ int shellspawn (const char *command,
     data.callbackRC = 0;
     data.context = context;
     data.needsConsole = 0;
-    data.createdConsole = 0;
 
     /* Input/Output vectors */
     data.aInput = aIn;
@@ -233,20 +230,9 @@ int shellspawn (const char *command,
     }
 
     // Do we need a console and do we need to create one? - these functions work it out
-    NeedsNewConsole(pIn, &data);
-    NeedsNewConsole(pOut, &data);
-    NeedsNewConsole(pErr, &data);
-    if (data.createdConsole) // We need to create a console
-    {
-        if (!AllocConsole())
-        {
-            // Error - try and clean-up
-            Error("Failure W1 in AllocConsole() in shellspawn()", errorText);
-            CleanUp(&data);
-            return SHELLSPAWN_FAILURE;
-        }
-// TODO - Disable the close button(?)
-    }
+    NeedsConsole(pIn, &data);
+    NeedsConsole(pOut, &data);
+    NeedsConsole(pErr, &data);
 
     // Clear any output strings
     if (data.aOutput && *data.aOutput) {
@@ -936,20 +922,6 @@ int shellspawn (const char *command,
         data.callbackHandled = NULL;
     }
 
-    // Close the console if we created one
-    if (data.createdConsole)
-    {
-        PressToContinue();
-        if (!FreeConsole())
-        {
-            // Error - try and clean-up
-            Error("Failure W44 in FreeConsole() in shellspawn()", errorText);
-            CleanUp(&data);
-            return SHELLSPAWN_FAILURE;
-        }
-        data.createdConsole = 0;
-    }
-
     /* Check for errors set by threads */
     if (data.inThreadRC)
     {
@@ -1025,52 +997,44 @@ void CleanUp(SHELLDATA* data)
         data->callbackBuffer = NULL;
     }
     data->callbackRC = 0;
-    if (data->createdConsole)
-    {
-        FreeConsole();
-        data->createdConsole = 0;
-    }
 }
 
-// Routine to see if a FILE* descriptor implies that we need a create a new console
-// Creates a console if need be
-void NeedsNewConsole(FILE* file, SHELLDATA* data)
+// Routine to see if a FILE* descriptor implies that we need to stay attached to the
+// console
+void NeedsConsole(FILE* file, SHELLDATA* data)
 {
     HANDLE h, d;
 
-    if (data->createdConsole) return; // Job already done
+    if (data->needsConsole) return; // Job already done
 
-    if (file == NULL) return;    // Null - not relavent console not needed
+    if (file == NULL) return;    // Null - not relevant console not needed
 
     if (file == stdin) h = GetStdHandle(STD_INPUT_HANDLE);
     else if (file == stdout) h = GetStdHandle(STD_OUTPUT_HANDLE);
     else if (file == stderr) h = GetStdHandle(STD_ERROR_HANDLE);
     else return; // Not a std file at all ... console not needed
 
-    if (h == NULL) data->createdConsole = 1; // We need a console - but XP (at least) does not return this
-    else if (h == INVALID_HANDLE_VALUE) data->createdConsole = 1; // We need a console - but again XP (at least) does not return this
+    if (h == NULL || h == INVALID_HANDLE_VALUE) data->needsConsole = 0; // Console not valid - but XP (at least) does not return this
     else
     {
         /* OK Now we have to work out if the handle is actually valid ...
-           DuplicateHandle fails on XP if not so we can test this           */
+           DuplicateHandle fails (on XP) if not so we can test this      */
         if (!DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(),
                              &d,                 // Address of new handle.
                              0, TRUE,            // Make it inheritable.
                              DUPLICATE_SAME_ACCESS))
         {
-            data->createdConsole = 1; // Error - so the handle is invalid - we need a new console
+            data->needsConsole = 1; // Error - Console not valid
         }
         else
         {
             // The handle must be OK after all ...
             if (_isatty(_fileno(file))) data->needsConsole = 1; // Seems to be a console device
-            // else it has been redirected [to a file] ... so a console is not needed
+            else data->needsConsole = 0; // it has been redirected [to a file] ... so console is not needed
             CloseHandle(d); // close the duplicate handle in any case
         }
     }
-    if (data->createdConsole) data->needsConsole = 1;
 }
-
 
 /* Procedure - running in the main thread - to call the caller's callback handlers */
 int HandleCallback(SHELLDATA* data, char **errorText)
@@ -1496,39 +1460,4 @@ void Error(char *context, char **errorText)
     *errorText = malloc(message_len);
     snprintf(*errorText, message_len, context, sRC, lpvMessageBuffer);
     LocalFree(lpvMessageBuffer);
-}
-
-void PressToContinue()
-{
-    HANDLE hStdout, hStdin;
-    LPSTR lpszPrompt = "Command Completed - Press ENTER to continue";
-    CHAR chBuffer[256];
-    DWORD cRead, cWritten;
-
-    // Get handles to STDIN and STDOUT.
-    hStdin = GetStdHandle(STD_INPUT_HANDLE);
-    hStdout = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hStdin == INVALID_HANDLE_VALUE ||
-        hStdout == INVALID_HANDLE_VALUE)
-    {
-        return;
-    }
-
-    // Write to STDOUT and read from STDIN
-    if (! WriteFile(
-            hStdout,              // output handle
-            lpszPrompt,          // prompt string
-            lstrlen(lpszPrompt), // string length
-            &cWritten,            // bytes written
-            NULL) )               // not overlapped
-    {
-        return;
-    }
-
-    ReadFile(
-            hStdin,    // input handle
-            chBuffer,  // buffer to read into
-            255,       // size of buffer
-            &cRead,    // actual bytes read
-            NULL);     // not overlapped
 }

@@ -41,12 +41,12 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-//#include <sys/stropts.h>
-//#include <sys/ioctl.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <termios.h>
-
+#ifdef __APPLE__
+#include <signal.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -86,7 +86,7 @@ typedef struct shelldata {
     int hInputRead,  hInputWrite;
     /* Identifier for threads */
     pthread_t hInThread,  hOutThread,  hErrThread, hWaitThread;
-    /* Thread cmmunication */
+    /* Thread communication */
     pthread_mutex_t *criticalsection;
     //pthread_mutexattr_t mutexType;
     pthread_cond_t *callbackRequested;
@@ -98,9 +98,6 @@ typedef struct shelldata {
     char *callbackBuffer;
     int callbackRC;
     void* context;
-    int needsCreatedConsole;
-    int consoleMaster, consoleSlave;
-    int consolePID;
     int proxySend, proxyReceive, proxySendRead, proxyReceiveWrite, proxyPID;
     char* buffer;
     char* file_path;
@@ -122,13 +119,9 @@ static void HandleOutputToCallback(int hRead, OUTHANDLER fOut, int *error, char 
 static void HandleStdinFromVector(SHELLDATA* data);
 static void HandleStdinFromCallback(SHELLDATA* data);
 static int HandleCallback(SHELLDATA* data, char **errorText);
-static int NeedsNewConsole(FILE* file, SHELLDATA* data);
 static int ParseCommand(const char *command_string, char **command, char **file, char ***argv);
 static int ProxyWorker(SHELLDATA* data);
 static void launchChild(SHELLDATA* data);
-static void PressToContinue(SHELLDATA* data);
-static int CreateConsole(SHELLDATA* data);
-static void FreeConsole(SHELLDATA* data);
 static int ExeFound(char* exe);
 
 static void setTextOutput(char **outputText, char *inputText) {
@@ -217,7 +210,6 @@ int shellspawn (const char *command,
     data.callbackBuffer = NULL;
     data.callbackRC = 0;
     data.context = context;
-    data.needsCreatedConsole = 0;
     data.proxySend = -1;
     data.proxyReceive = -1;
     data.proxySendRead = -1;
@@ -226,9 +218,6 @@ int shellspawn (const char *command,
     data.buffer = 0;
     data.file_path = 0;
     data.argv = 0;
-    data.consoleMaster = -1;
-    data.consoleSlave = -1;
-    data.consolePID = 0;
 
 /* Input/Output vectors */
     data.aInput = aIn;
@@ -276,32 +265,6 @@ int shellspawn (const char *command,
         *data.sError = 0;
     }
 
-    // Do we need a console and do we need to create one? - these functions work it out
-    if (NeedsNewConsole(pIn, &data) < 0) {
-        Error("Failure U1 in NeedsNewConsole(In) in shellspawn()", errorText);
-        CleanUp(&data);
-        return SHELLSPAWN_FAILURE;
-    }
-    if (NeedsNewConsole(pOut, &data) < 0) {
-        Error("Failure U2 in NeedsNewConsole(Out) in shellspawn()", errorText);
-        CleanUp(&data);
-        return SHELLSPAWN_FAILURE;
-    }
-    if (NeedsNewConsole(pErr, &data) < 0) {
-        Error("Failure U3 in NeedsNewConsole(Err) in shellspawn()", errorText);
-        CleanUp(&data);
-        return SHELLSPAWN_FAILURE;
-    }
-
-    if (data.needsCreatedConsole) // We need to create a console
-    {
-        if (CreateConsole(&data)) {
-            Error("Failure U4 in CreateConsole() in shellspawn()", errorText);
-            CleanUp(&data);
-            return SHELLSPAWN_FAILURE;
-        }
-    }
-
     // Do we need the event handlers i.e. Have we any callbacks ...
     if ((fIn ? 1 : 0) + (fOut ? 1 : 0) + (fErr ? 1 : 0) > 0) {
         data.callbackRequested = malloc(sizeof(pthread_cond_t));
@@ -347,10 +310,7 @@ int shellspawn (const char *command,
     // Create the output pipe and handles
     if (pOut) {
         // We have been given a FILE* stream so we want to make a file descriptor
-        if (data.needsCreatedConsole && pOut == stdout)
-            data.hOutputFile =
-                    data.consoleSlave; // Redirect to our new console
-        else data.hOutputFile = fileno(pOut);
+        data.hOutputFile = fileno(pOut);
     } else {
         // We Create a pipe
         int temppipe[2];    // This holds the fd for the input & output of the pipe ([0] for reading, [1] for writing)
@@ -365,10 +325,7 @@ int shellspawn (const char *command,
 // Create the standard error output pipe and handles
     if (pErr) {
 // We have been given a FILE* stream so we want to make a file descriptor
-        if (data.needsCreatedConsole && pErr == stderr)
-            data.hErrorFile =
-                    data.consoleSlave; // Redirect to our new console
-        else data.hErrorFile = fileno(pErr);
+        data.hErrorFile = fileno(pErr);
     } else {
         // We Create a pipe
         int temppipe[2];    // This holds the fd for the input & output of the pipe ([0] for reading, [1] for writing)
@@ -384,13 +341,14 @@ int shellspawn (const char *command,
     // Create the child input pipe.
     if (pIn) {
         // We have been given a FILE* stream so we want to make a file descriptor
-        if (data.needsCreatedConsole && pIn == stdin)
-            data.hInputFile =
-                    data.consoleSlave; // Redirect to our new console
-        else data.hInputFile = fileno(pIn);
+        data.hInputFile = fileno(pIn);
     } else if (fIn) {
         // We have been given a function callback we need to create a Pseudo-Terminal Pair ....
+#ifdef __APPLE__
+        data.hInputWrite = posix_openpt(O_RDWR);
+#else
         data.hInputWrite = getpt();
+#endif
         if (data.hInputWrite == -1) {
             Error("Failure U12 in getpt() in shellspawn()", errorText);
             CleanUp(&data);
@@ -483,7 +441,6 @@ int shellspawn (const char *command,
         return SHELLSPAWN_NOFOUND;
     }
 
-
     if (fIn) // We need to create a proxy pseudo shell and launch the child process
     {
         if ((data.proxyPID = fork()) == -1) {
@@ -527,17 +484,6 @@ int shellspawn (const char *command,
                 exit(-1);
             }
             dup2(data.hInputFile,0);
-
-            /*
-            if (isastream(data.hInputRead)) // For System V derived systems ...
-            {
-                if (ioctl(data.hInputRead, I_PUSH, "ptem") < 0 || ioctl(data.hInputRead, I_PUSH, "ldterm") < 0)
-                {
-                    perror("Failure U26 in ioctl() in shellspawn()");
-                    exit(-1);
-                }
-            }
-            */
 
             data.proxyPID = getpid();
 
@@ -793,12 +739,6 @@ int shellspawn (const char *command,
         data.criticalsection = NULL;
     }
 
-// Close the console if we created one
-    if (data.needsCreatedConsole) {
-        PressToContinue(&data);
-        FreeConsole(&data);
-    }
-
 /* Check for errors set by threads */
     if (data.inThreadRC) {
         appendTextOutput(errorText,data.inThreadErrorText);
@@ -817,7 +757,6 @@ int shellspawn (const char *command,
 
     return SHELLSPAWN_OK;
 }
-
 
 void CleanUp(SHELLDATA* data)
 {
@@ -861,10 +800,6 @@ void CleanUp(SHELLDATA* data)
     data->callbackOutputHandler = NULL;
     data->callbackBuffer = NULL;
     data->callbackRC = 0;
-    if (data->needsCreatedConsole) FreeConsole(data);
-    if (data->consoleMaster != -1) close(data->consoleMaster);
-    if (data->consoleSlave != -1) close(data->consoleSlave);
-    if (data->consolePID) kill(data->consolePID,9); // 15=TERM, 9=KILL
     if (data->proxySend != -1) close(data->proxySend);
     if (data->proxyReceive != -1) close(data->proxyReceive);
     if (data->proxySendRead != -1) close(data->proxySendRead);
@@ -873,33 +808,6 @@ void CleanUp(SHELLDATA* data)
     if (data->buffer) free(data->buffer);
     if (data->argv) free(data->argv);
     if (data->file_path) free(data->file_path);
-}
-
-// Routine to see if a FILE* descriptor implies that we need to create a new console
-// If the file is stdin/out/err and is redirected to null then create a console
-// TODO - Really want to do this?
-int NeedsNewConsole(FILE* file, SHELLDATA* data)
-{
-    if (data->needsCreatedConsole) return 0; // Job already done
-
-    if (file == NULL) return 0;    // Null - not relevant console not needed
-
-    if (file == stdin || file == stdout || file == stderr)
-    {
-        struct stat std_out;
-        struct stat dev_null;
-
-        // Check that standard output is redirected to /dev/null by checking that
-        // the FILE* and /dev/null are both devices with the same inode:
-        if (fstat(fileno(file), &std_out) == 0 &&
-            S_ISCHR(std_out.st_mode) &&
-            stat("/dev/null", &dev_null) == 0 &&
-            std_out.st_dev == dev_null.st_dev &&
-            std_out.st_ino == dev_null.st_ino)
-                data->needsCreatedConsole = 1;
-    }
-
-    return 0;
 }
 
 /* Procedure - running in the main thread - to call the caller's callback handlers */
@@ -926,7 +834,7 @@ int HandleCallback(SHELLDATA* data, char **errorText) {
             break;
 
         default:
-// Something bad has happended - this has gone wrong
+// Something bad has happened - this has gone wrong
             setTextOutput(errorText,
                           "Failure U39 in HandleCallback() in HandleCallback(). Internal Error: Unexpected callbackType");
             return -1;
@@ -1614,7 +1522,6 @@ int ParseCommand(const char *command_string, char **command, char **file, char *
     return 0;
 }
 
-
 // Main loop for the proxy/pseudo shell
 // This takes care of waiting for signals on the child and moving the child to the forground and background
 int ProxyWorker(SHELLDATA* data)
@@ -1684,13 +1591,14 @@ int ProxyWorker(SHELLDATA* data)
                         }
                         if (CommBuffer[0]=='X') // I.e. Not C (Terminal is being closed) or E (Error)
                         {
+#ifndef __APPLE__
                             // Stop the job
                             if (kill ( -data->ChildProcessPID, SIGSTOP) < 0)
                             {
                                 perror("Failure U75 in kill(SIGSTOP) in shellspawn()");
                                 return -1;
                             }
-
+#endif
                             // Put the job into the background
                             if (tcsetpgrp(data->hInputRead, data->proxyPID)<0)
                             {
@@ -1698,12 +1606,14 @@ int ProxyWorker(SHELLDATA* data)
                                 return -1;
                             }
 
+#ifndef __APPLE__
                             // Continue it
                             if (kill ( -data->ChildProcessPID, SIGCONT) < 0)
                             {
                                 perror("Failure U77 in kill(SIGCONT) in WaitForProcess()");
                                 return -1;
                             }
+#endif
                         }
                         break;
 
@@ -1802,84 +1712,9 @@ void launchChild(SHELLDATA* data)
     exit(-1);
 }
 
-int CreateConsole(SHELLDATA* data)
-{
-    char *name; // Termainal Name
-
-    // we need to create a Pseudo-Terminal Pair ....
-    data->consoleMaster = getpt();
-    if (data->consoleMaster == -1) return -1;
-    if (grantpt(data->consoleMaster) == -1) return -1;
-    if (unlockpt(data->consoleMaster) == -1) return -1;
-
-    // Open the slave end of the pseudo terminal
-    name = ptsname(data->consoleMaster);
-    if (name == NULL) return -1;
-    data->consoleSlave = open(name, O_RDWR | O_NOCTTY);
-    if (data->consoleSlave == -1) return -1;
-
-    /*
-    if (isastream(data->consoleSlave)) // For System V derived systems ...
-    {
-        if (ioctl(data->consoleSlave, I_PUSH, "ptem") < 0 || ioctl(data->consoleSlave, I_PUSH, "ldterm") < 0)
-            return -1;
-    }
-    */
-
-    if( (data->consolePID = fork()) == -1) return -1;
-    if (data->consolePID == 0) // Child Process
-    {
-        close(data->consoleSlave);
-        char option[10];
-        sprintf(option, "-S%c/%d", name[strlen(name)-1], data->consoleMaster);
-        if (execlp("xterm", "xterm", option, (char *)0)) perror("execl xterm");
-        exit(-1);
-    }
-
-    // Read the Window ID that xterm writes for us - we don't use it
-    char buf[80];
-    read(data->consoleSlave, buf, 80);
-
-    // Clear Screen
-    write(data->consoleSlave, "\033[2J\033[H", 7);
-
-    // We don't need the console master
-    close(data->consoleMaster);
-    data->consoleMaster = -1;
-    return 0;
-}
-
-void FreeConsole(SHELLDATA* data)
-{
-    if (data->consoleSlave != -1) close(data->consoleSlave);
-    data->consoleSlave = -1;
-
-    if (data->consoleMaster != -1) close(data->consoleMaster);
-    data->consoleMaster = -1;
-
-    if (data->consolePID) kill(data->consolePID, 15); // 15=TERM, 9=KILL
-    data->consolePID = 0;
-
-    data->needsCreatedConsole = 0;
-}
-
-void PressToContinue(SHELLDATA* data)
-{
-    if (data->consoleSlave > -1)
-    {
-        char* prompt = "\nCommand Completed - Press ENTER to continue\n";
-        char buf[1];
-        write(data->consoleSlave, prompt, strlen(prompt));
-        read(data->consoleSlave, buf, 1);
-    }
-}
-
 // alarm handler doesn't need to do anything
 // other than simply exist
-static void alarm_handler( int sig )
-{
-    return;
-}
+static void alarm_handler( int sig ) {}
 
 // stat() with a timeout measured in seconds
 // will return -1 with errno set to EINTR should
